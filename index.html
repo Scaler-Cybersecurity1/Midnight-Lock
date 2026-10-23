@@ -1,0 +1,998 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Midnight Lock</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="IR-01 — a scenario-based incident response lab: work a ransomware attack from first alert to lessons learned.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: an on-call responder's console — a sticky incident bar (clock, phase, impact meters)
+   above a two-pane workspace: the current decision on the left, the evidence locker on the right. */
+:root {
+  --bg: #eef1f5;
+  --surface: #ffffff;
+  --surface-2: #e5eaf1;
+  --ink: #141a23;
+  --muted: #566276;
+  --line: #d2d9e3;
+  --accent: #b4530a;
+  --accent-soft: #fbeadb;
+  --accent-ink: #ffffff;
+  --good: #1d7a4b;
+  --bad: #b42318;
+  --bar: #172030;
+  --bar-ink: #e9eef5;
+  --bar-muted: #93a1b6;
+  --font-display: "Archivo", Arial, system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --radius: 6px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1219; --surface: #141b26; --surface-2: #1b2431; --ink: #e4e9f1; --muted: #93a0b4;
+    --line: #283345; --accent: #f0a04b; --accent-soft: #3a2611; --accent-ink: #1c1206;
+    --good: #4cc38a; --bad: #f2777a; --bar: #0a0f15; --bar-ink: #e4e9f1; --bar-muted: #8494aa;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1219; --surface: #141b26; --surface-2: #1b2431; --ink: #e4e9f1; --muted: #93a0b4;
+  --line: #283345; --accent: #f0a04b; --accent-soft: #3a2611; --accent-ink: #1c1206;
+  --good: #4cc38a; --bad: #f2777a; --bar: #0a0f15; --bar-ink: #e4e9f1; --bar-muted: #8494aa;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 var(--font-body); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bar); }
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gutter { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.inner { max-width: 1280px; margin: 0 auto; }
+.eyebrow { font: 600 11.5px/1.2 var(--font-body); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; }
+
+/* ---- Incident bar ---- */
+.topbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bar); color: var(--bar-ink); padding-block: 12px; }
+.topbar .inner { display: grid; grid-template-columns: auto 1fr auto; gap: 10px 28px; align-items: center; }
+.inc-id { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.inc-id .eyebrow { color: var(--bar-muted); }
+.inc-id strong { font: 700 16px/1.2 var(--font-display); letter-spacing: .01em; }
+.clock { text-align: right; }
+.clock .time { font: 500 24px/1 var(--font-mono); font-variant-numeric: tabular-nums; }
+.clock .day { font-size: 12px; color: var(--bar-muted); margin-top: 3px; }
+.phases { display: flex; gap: 4px; list-style: none; margin: 0; padding: 0; min-width: 0; }
+.phases li { flex: 1; min-width: 0; font-size: 11.5px; line-height: 1.25; color: var(--bar-muted); padding-top: 7px;
+  border-top: 3px solid color-mix(in srgb, var(--bar-ink) 16%, transparent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.phases li.done { color: var(--bar-ink); border-top-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.phases li.now { color: var(--bar-ink); font-weight: 600; border-top-color: var(--accent); }
+.meters { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 20px; }
+.meter { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; font-size: 12px; align-items: baseline; }
+.meter span:first-child { color: var(--bar-muted); }
+.meter .val { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.meter .track { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: color-mix(in srgb, var(--bar-ink) 14%, transparent); overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 3px; transition: width .5s ease, background-color .5s; }
+
+/* ---- Main ---- */
+main { padding-block: 24px 44px; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+
+.stage { padding: 24px 26px 26px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.stage-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+.stage h2 { font-size: clamp(23px, 3vw, 29px); font-weight: 700; line-height: 1.1; letter-spacing: -.005em; }
+.counter { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+.msg { display: grid; grid-template-columns: 36px 1fr; gap: 12px; padding: 14px 16px; background: var(--surface-2); border-radius: var(--radius); }
+.avatar { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--bar); color: var(--bar-ink); font: 600 13px/1 var(--font-body); }
+.msg .who { font-size: 13px; color: var(--muted); }
+.msg .who b { color: var(--ink); font-weight: 600; }
+.msg p { margin: 4px 0 0; }
+.brief p { margin: 0 0 10px; max-width: 68ch; }
+.brief p:last-child { margin-bottom: 0; }
+.prompt { font: 600 18px/1.35 var(--font-display); }
+.options { display: grid; gap: 10px; }
+.opt { display: grid; grid-template-columns: 28px 1fr; gap: 12px; text-align: left; align-items: start; padding: 13px 14px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); cursor: pointer; transition: border-color .15s, background-color .15s; }
+.opt:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+.opt .key { width: 28px; height: 28px; border-radius: 4px; display: grid; place-items: center; font: 600 13px/1 var(--font-mono); border: 1px solid var(--line); color: var(--muted); }
+.opt:disabled { cursor: default; }
+.opt.chosen { border-color: var(--accent); background: var(--accent-soft); }
+.opt.faded { opacity: .45; }
+.opt.chosen .key { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.outcome { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; display: grid; gap: 10px; }
+.outcome p { margin: 0; max-width: 68ch; }
+.fx { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 12px/1 var(--font-mono); padding: 5px 8px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; }
+.chip.up { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.chip.down { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+.answer-form { display: grid; gap: 10px; }
+.answer-form label { font-weight: 600; font-size: 14px; }
+.answer-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.answer-row input { flex: 1 1 220px; min-width: 0; padding: 11px 12px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--surface); font-family: var(--font-mono); }
+.answer-row input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+.answer-row .status { font-family: var(--font-mono); font-size: 13px; }
+.answer-row .status.ok { color: var(--good); }
+.answer-row .status.no { color: var(--bad); }
+.hint { font-size: 13px; color: var(--muted); margin: 0; max-width: 68ch; }
+.btn { border: 1px solid transparent; border-radius: var(--radius); padding: 10px 16px; cursor: pointer; font-weight: 600; font-size: 14px; background: var(--accent); color: var(--accent-ink); }
+.btn:hover { filter: brightness(1.06); }
+.btn.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+.btn.ghost:hover { border-color: var(--muted); filter: none; }
+.btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.to-evidence { font-size: 13.5px; color: var(--accent); background: none; border: 0; cursor: pointer; padding: 0; display: none; text-decoration: underline; }
+
+/* ---- Evidence locker ---- */
+.side { display: grid; gap: 24px; min-width: 0; }
+.locker { min-width: 0; overflow: hidden; }
+.locker-head { padding: 16px 18px 0; display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.locker-head h3 { font-size: 17px; font-weight: 700; }
+.counter { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+.tabs { display: flex; gap: 2px; overflow-x: auto; padding: 12px 12px 0; border-bottom: 1px solid var(--line); scrollbar-width: thin; }
+.tab { flex: 0 0 auto; border: 0; background: transparent; padding: 8px 10px 10px; cursor: pointer; font-size: 13px; color: var(--muted);
+  border-bottom: 2px solid transparent; margin-bottom: -1px; display: inline-flex; gap: 6px; align-items: center; }
+.tab:hover { color: var(--ink); }
+.tab.active { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+.new { font: 600 10px/1 var(--font-body); letter-spacing: .05em; padding: 3px 5px; border-radius: 3px; background: var(--accent); color: var(--accent-ink); }
+.ev-body { padding: 16px 18px 18px; display: grid; gap: 12px; min-width: 0; }
+.ev-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12.5px; color: var(--muted); }
+.ev-meta b { color: var(--ink); font-weight: 600; }
+.ev-note { font-size: 13.5px; margin: 0; max-width: 68ch; color: var(--muted); }
+.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); max-height: 460px; }
+table { border-collapse: collapse; width: 100%; font: 12.5px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; }
+th { position: sticky; top: 0; background: var(--surface-2); text-align: left; font: 600 11px/1.3 var(--font-body); letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted); padding: 8px 10px; white-space: nowrap; }
+td { padding: 7px 10px; border-top: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+td.wrap { white-space: normal; min-width: 200px; }
+tr.hot td { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.doc { font: 13.5px/1.6 var(--font-mono); background: var(--surface-2); padding: 16px; border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.locked { font-size: 13px; color: var(--muted); padding: 24px 18px; margin: 0; text-align: center; }
+
+.log { padding: 16px 18px; }
+.log h3 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+.log ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.log li { display: grid; grid-template-columns: 52px 1fr; gap: 10px; font-size: 13.5px; }
+.log li .t { font-family: var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.log .empty { color: var(--muted); font-size: 13.5px; }
+
+/* ---- Briefing + report ---- */
+.sheet { max-width: 880px; margin: 0 auto; padding: 32px 34px; display: grid; gap: 22px; }
+.sheet h1 { font-size: clamp(36px, 7vw, 58px); font-weight: 800; line-height: .98; letter-spacing: -.015em; }
+.sheet .lede { font-size: 17px; max-width: 64ch; margin: 0; }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.facts div { background: var(--surface); padding: 12px 14px; display: grid; gap: 4px; }
+.facts b { font-size: 14px; font-weight: 600; }
+.rules { margin: 0; padding-left: 20px; display: grid; gap: 7px; max-width: 72ch; }
+.rules li::marker { color: var(--accent); }
+.sheet h2 { font-size: 21px; font-weight: 700; }
+.flagbox { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: 16px 18px;
+  border: 2px dashed var(--accent); border-radius: var(--radius); background: var(--accent-soft); }
+.flagbox code { font: 500 clamp(15px, 2.6vw, 21px)/1.3 var(--font-mono); overflow-wrap: anywhere; min-width: 0; }
+.verdict { display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: center; }
+.grade { font: 800 42px/1 var(--font-display); width: 82px; height: 82px; display: grid; place-items: center; border-radius: var(--radius); border: 2px solid currentColor; }
+.verdict h2 { margin-bottom: 4px; }
+.verdict p { margin: 0; color: var(--muted); max-width: 60ch; }
+.final-meters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.final-meters div { display: grid; gap: 4px; }
+.final-meters .num { font: 600 26px/1 var(--font-mono); font-variant-numeric: tabular-nums; }
+.final-meters .lab { font-size: 12.5px; color: var(--muted); }
+.debrief { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.debrief li { display: grid; grid-template-columns: 86px 1fr; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.debrief .t { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); padding-top: 2px; }
+.debrief h3 { font-size: 15.5px; font-weight: 700; margin-bottom: 4px; }
+.debrief p { margin: 4px 0 0; font-size: 14px; max-width: 72ch; }
+.debrief .yours { font-family: var(--font-mono); font-size: 13px; }
+.debrief .yours.good { color: var(--good); }
+.debrief .yours.bad { color: var(--bad); }
+.debrief .lesson { color: var(--muted); }
+.debrief .lesson b { color: var(--ink); }
+.restart-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+footer { padding-block: 0 32px; font-size: 12.5px; color: var(--muted); }
+footer .inner { border-top: 1px solid var(--line); padding-top: 14px; max-width: 1280px; }
+
+@media (max-width: 960px) {
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .to-evidence { display: inline; }
+}
+@media (max-width: 720px) {
+  .topbar .inner { grid-template-columns: 1fr auto; }
+  .phases { grid-column: 1 / -1; grid-row: 2; }
+  .phases li { font-size: 0; }
+  .phases li.now { font-size: 11.5px; flex: 4; }
+  .meters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stage, .sheet { padding: 20px 18px; }
+  .facts, .final-meters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .debrief li { grid-template-columns: 1fr; gap: 4px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header class="topbar gutter">
+  <div class="inner">
+    <div class="inc-id">
+      <span class="eyebrow">Harbourline Logistics · Incident</span>
+      <strong>INC-20261017-0207</strong>
+    </div>
+    <ol class="phases" id="phases" aria-label="Response phase"></ol>
+    <div class="clock" aria-live="polite">
+      <div class="time" id="clockTime">02:07</div>
+      <div class="day" id="clockDay">Fri 17 Oct</div>
+    </div>
+    <div class="meters" id="meters" aria-label="Impact meters"></div>
+  </div>
+</header>
+
+<main class="gutter">
+  <div class="inner">
+
+    <section class="panel sheet" id="briefing">
+      <div class="eyebrow">Incident Response Lab · IR-01</div>
+      <h1>Midnight Lock</h1>
+      <p class="lede">You are the on-call incident responder for Harbourline Logistics, a freight company with 600 staff. At 02:07 on a Friday your phone goes off. Something is encrypting files across the network, and it hasn't stopped.</p>
+      <div class="facts">
+        <div><span class="eyebrow">Your role</span><b>On-call incident responder</b></div>
+        <div><span class="eyebrow">Time needed</span><b>30–40 minutes</b></div>
+        <div><span class="eyebrow">You will</span><b>Make 6 decisions · answer 3 questions</b></div>
+      </div>
+      <h2>How this lab works</h2>
+      <ol class="rules">
+        <li>The incident plays out in stages. At each stage someone briefs you, then you either <b>choose a response</b> or <b>answer a question</b> from the evidence.</li>
+        <li>New material — alerts, logs, emails, backup reports — arrives in the <b>evidence locker</b> on the right as the incident develops. Read it before you act.</li>
+        <li>Every choice is final. You'll see what happens and how it moves four impact meters: <b>Containment</b>, <b>Evidence</b>, <b>Operations</b> and <b>Trust</b>.</li>
+        <li>Questions are checked in your browser against the evidence — nothing is sent anywhere. Type exactly what the evidence shows.</li>
+        <li>At the end you get an incident report and a <b>flag</b>. The flag is built from the three facts you recover. Submit it on your course platform.</li>
+      </ol>
+      <div class="restart-row">
+        <button class="btn" id="startBtn" type="button">Take the call</button>
+        <button class="btn ghost" id="resetBtn" type="button" hidden>Start over</button>
+        <span class="hint" id="resumeHint" hidden>Progress on this device was restored.</span>
+      </div>
+    </section>
+
+    <div class="workspace" id="console" hidden>
+      <section class="panel stage" id="stage" aria-live="polite"></section>
+      <div class="side">
+        <section class="panel locker" id="locker" aria-label="Evidence locker">
+          <div class="locker-head">
+            <h3>Evidence locker</h3>
+            <span class="counter" id="evCount"></span>
+          </div>
+          <div class="tabs" id="tabs" role="tablist"></div>
+          <div class="ev-body" id="evBody"></div>
+        </section>
+        <section class="panel log">
+          <h3>Your actions</h3>
+          <ol id="log"><li class="empty">No decisions logged yet.</li></ol>
+        </section>
+      </div>
+    </div>
+
+    <section class="panel sheet" id="report" hidden></section>
+
+  </div>
+</main>
+
+<footer class="gutter">
+  <div class="inner">Fictional training scenario. Harbourline Logistics, its people and systems are invented; all IP addresses are from reserved documentation ranges (RFC&nbsp;5737).</div>
+</footer>
+
+<script>
+"use strict";
+
+/* =====================================================================
+   SCENARIO — edit this block to build new labs.
+   fx meter keys:  c=Containment  e=Evidence  o=Operations  t=Trust
+   Answer checks store only a SHA-256 hash, so the correct answer never
+   appears in the page source. Recompute hashes when you change answers:
+     printf '%s' 'youranswer' | shasum -a 256
+   ===================================================================== */
+const METERS = [
+  { key: "c", label: "Containment", start: 25 },
+  { key: "e", label: "Evidence",    start: 80 },
+  { key: "o", label: "Operations",  start: 55 },
+  { key: "t", label: "Trust",       start: 75 }
+];
+const PHASES = ["Detect & analyse", "Contain", "Eradicate & recover", "Notify", "Lessons learned"];
+
+const EVIDENCE = [
+  {
+    id: "edr", phase: 0, label: "EDR alert", kind: "doc",
+    meta: [["Source", "Sentinel EDR"], ["Severity", "Critical"], ["Raised", "Fri 17 Oct 02:07"]],
+    body:
+`ALERT ID   : SEN-44192
+RULE       : Mass file modification + known ransomware extension (*.lockd)
+SEVERITY   : CRITICAL
+HOSTS      : FIN-WS-014 (finance), HR-WS-007 (hr), FS-02 (file server)
+SUMMARY    : 184,220 files on \\\\FS-02\\shared renamed to *.lockd in 26 min.
+             Encryption still in progress. Process vssadmin.exe observed
+             deleting volume shadow copies on FIN-WS-014.
+FIRST SEEN : encryption activity began 01:41 on FIN-WS-014.
+NETWORK    : FIN-WS-014 holds an open SMB session to FS-02.`
+  },
+  {
+    id: "auth", phase: 0, label: "VPN & auth log", kind: "table",
+    meta: [["Source", "RADIUS / VPN concentrator"], ["Window", "Thu 23:00 – Fri 02:05"]],
+    note: "Successful and failed logins. The VPN is reachable from the internet; staff use it from home.",
+    columns: ["Time", "Account", "Source IP", "Event"],
+    rows: [
+      ["23:12", "jbanks",  "203.0.113.19",  "VPN login OK"],
+      ["23:40", "jbanks",  "203.0.113.19",  "VPN logout"],
+      ["01:09", "rmccabe", "198.51.100.77", "VPN login FAILED (bad password)"],
+      ["01:10", "rmccabe", "198.51.100.77", "VPN login FAILED (bad password)"],
+      ["01:12", "rmccabe", "198.51.100.77", "VPN login OK", true],
+      ["01:14", "rmccabe", "198.51.100.77", "RDP to FIN-WS-014", true],
+      ["01:31", "rmccabe", "198.51.100.77", "Access to \\\\FS-02\\shared"],
+      ["01:52", "svc_backup", "10.4.9.12",  "Scheduled backup job started"]
+    ]
+  },
+  {
+    id: "mail", phase: 0, label: "Reported email", kind: "doc",
+    meta: [["Reported by", "r.mccabe@harbourline.com"], ["Received", "Thu 16 Oct 18:52"]],
+    note: "Rhona McCabe forwarded this to the helpdesk on Thursday evening, after 'the invoice wouldn't open properly'.",
+    body:
+`From:    Accounts Payable <billing@harbourline-invoices.com>
+To:      r.mccabe@harbourline.com
+Subject: Overdue invoice 4471 — action required today
+Date:    Thu 16 Oct 18:52
+
+Hi Rhona,
+
+Please find attached the outstanding invoice. Macros must be
+enabled to view the secured content. Settle today to avoid the
+late fee.
+
+  [ Invoice_4471.xlsm ]   (enable editing + content to view)
+
+Regards,
+Accounts Payable
+
+-- note: the real company domain is harbourline.com, not
+   harbourline-invoices.com.`
+  },
+  {
+    id: "fileaudit", phase: 0, label: "File-server audit", kind: "table",
+    meta: [["Source", "FS-02 file audit"], ["Date", "Fri 17 Oct"]],
+    note: "First rename to the ransomware extension marks when encryption began.",
+    columns: ["Time", "Host", "Action", "Example path"],
+    rows: [
+      ["01:33", "FIN-WS-014", "READ",   "\\shared\\finance\\2026-Q3.xlsx"],
+      ["01:41", "FIN-WS-014", "RENAME", "\\shared\\finance\\2026-Q3.xlsx.lockd", true],
+      ["01:41", "FIN-WS-014", "RENAME", "\\shared\\hr\\contracts\\a001.pdf.lockd", true],
+      ["02:06", "FIN-WS-014", "RENAME", "\\shared\\ops\\manifest-8841.csv.lockd"]
+    ]
+  },
+  {
+    id: "backup", phase: 2, label: "Backup report", kind: "doc",
+    meta: [["Source", "Veeam-style backup console"], ["Pulled", "Fri 17 Oct 02:40"]],
+    note: "Appears after you reach the recovery phase.",
+    body:
+`BACKUP SETS
+-----------------------------------------------
+Set           Target         Last good   State
+nightly-disk  \\\\FS-02\\bkp   Thu 22:00   ENCRYPTED (*.lockd)
+nightly-disk  (on same share the ransomware reached)
+offline-tape  LTO vault      Wed 22:00   VERIFIED, offline
+cloud-immut   object lock    Thu 22:00   VERIFIED, immutable
+
+Note: the disk backup lives on FS-02 and was encrypted with
+everything else. The tape and the immutable cloud copy were
+never reachable from the network.`
+  },
+  {
+    id: "ransom", phase: 2, label: "Ransom note", kind: "doc",
+    meta: [["File", "FIN-WS-014:\\Desktop\\READ_TO_UNLOCK.txt"], ["Group", "self-styled 'LockdCrew'"]],
+    note: "Dropped on each affected desktop.",
+    body:
+`YOUR FILES ARE ENCRYPTED.
+
+Pay 14 BTC within 72 hours for the decryptor.
+We also copied 40GB of your data. Pay or we publish.
+
+Contact: lockdcrew@onion-chat (Tor)
+
+Do not involve police or recovery firms.`
+  }
+];
+
+const STAGES = [
+  {
+    kind: "decision", phase: 0, time: "02:07", day: "Fri 17 Oct",
+    reveals: ["edr", "auth", "mail", "fileaudit"],
+    title: "Encryption in progress",
+    from: { name: "Sentinel EDR", role: "automated alert", initials: "ED" },
+    message: "CRITICAL: ransomware behaviour on FIN-WS-014, HR-WS-007 and file server FS-02. 184,000+ files renamed to *.lockd in the last 26 minutes. Encryption continuing.",
+    brief: [
+      "You're first up. Three machines are hit and files are still being encrypted on FS-02, the company-wide shared drive. No one else from IT is online yet.",
+      "Whatever you do in the next few minutes decides how much of the company can still work at 09:00 — and how much of the attack you'll still be able to reconstruct afterwards."
+    ],
+    prompt: "What is your first move?",
+    options: [
+      { id: "a", text: "Power off every server and workstation in the building immediately.",
+        fx: { c: 18, e: -35, o: -25 },
+        result: "Encryption stops, but the whole company goes dark — including machines that were never infected. Powering off also wipes memory, so the live ransomware process, its network connections and any keys in RAM are gone before anyone can capture them.",
+        tag: "Over-reaction, evidence destroyed" },
+      { id: "b", text: "Network-isolate the three affected hosts (quarantine via EDR) but leave them powered on.",
+        fx: { c: 22, e: 8, o: 6 },
+        result: "The EDR drops the three hosts off the network within a minute. Encryption of FS-02 stops because FIN-WS-014 can no longer reach the share. The machines stay powered on, so memory and live artefacts are preserved for analysis. The rest of the company is untouched.",
+        tag: "Textbook containment", best: true },
+      { id: "c", text: "Start restoring FS-02 from last night's backup right away to get files back.",
+        fx: { c: -10, e: -5, o: -15 },
+        result: "You restore onto a network the attacker still controls, over files that are still being encrypted. The restore collides with live encryption and the backup you're pulling from turns out to be on the same server. You've lost time and tipped your hand without containing anything.",
+        tag: "Recovery before containment" },
+      { id: "d", text: "Email the whole company telling everyone to stop working and watch for suspicious files.",
+        fx: { c: -5, e: -2, t: -8 },
+        result: "A mass email at 02:10 reaches no one useful and signals to the attacker — who may be reading mailboxes — that they've been spotted. The encryption keeps running while you type.",
+        tag: "Noise, no containment" }
+    ]
+  },
+  {
+    kind: "decision", phase: 0, time: "02:19", day: "Fri 17 Oct",
+    title: "Before you wipe anything",
+    from: { name: "You", role: "mental note", initials: "ME" },
+    message: "FIN-WS-014 is isolated but still running. Your instinct is to reimage it and move on. The forensics still live in its memory and disk.",
+    brief: [
+      "The infected hosts are quarantined and still powered on. Management will soon want them back in service.",
+      "Reimaging a machine erases what it can tell you — how the attacker got in, what ran, what they touched."
+    ],
+    prompt: "What do you do with the isolated hosts?",
+    options: [
+      { id: "a", text: "Reimage all three now so they're clean and ready to hand back.",
+        fx: { c: 3, e: -30, o: 8 },
+        result: "Clean machines, but you've destroyed the evidence. You can no longer prove how the attacker entered or what they stole, which hurts the investigation and any later legal or insurance claim.",
+        tag: "Evidence wiped for speed" },
+      { id: "b", text: "Capture a memory image and a disk image of each host, then leave them isolated.",
+        fx: { c: 5, e: 15, o: -3 },
+        result: "You capture RAM and a forensic disk image from each host while they're still live. That snapshot preserves the running process, network connections and recently opened files — the raw material for finding patient zero and the entry vector.",
+        tag: "Evidence preserved", best: true },
+      { id: "c", text: "Take photos of the ransom note on screen and call it documented.",
+        fx: { e: -10 },
+        result: "A photo of the note proves little. The volatile evidence in memory keeps degrading while you decide, and a powered-on-but-unexamined host can still surprise you.",
+        tag: "Documentation theatre" }
+    ]
+  },
+  {
+    kind: "question", phase: 0, time: "02:34", day: "Fri 17 Oct",
+    title: "Find patient zero",
+    from: { name: "Priya Nair", role: "IT manager, just joined the call", initials: "PN" },
+    message: "I'm online now. Before we touch recovery — which account did they come in on? I need to know whose access to kill.",
+    brief: [
+      "Work the VPN & auth log and the reported email together. One internet-facing account was brute-forced and then logged in successfully, minutes before the RDP into the first encrypted host.",
+      "That same person reported a suspicious invoice on Thursday evening."
+    ],
+    fields: [
+      { id: "q1", key: "rmccabe",
+        label: "Which user account did the attacker compromise and log in with?",
+        placeholder: "username",
+        hash: "3822c62f8ad02c9ba58c2b9f691c637ec36b6445050ebbe0b5475f7dcbfef2d7",
+        hint: "Look in the VPN & auth log for the account with failed logins immediately followed by a successful one from the same outside IP — the highlighted rows. It's the same person who reported the invoice email." }
+    ]
+  },
+  {
+    kind: "question", phase: 0, time: "02:48", day: "Fri 17 Oct",
+    title: "How did they get a foothold?",
+    from: { name: "Priya Nair", role: "IT manager", initials: "PN" },
+    message: "Good. Now — how did they get that password in the first place? The board will ask, and the answer changes what we fix.",
+    brief: [
+      "Look at what the compromised user did before the attack. The reported email in the locker is the thread to pull.",
+      "Answer with the single word for the attack technique that handed the attacker the credentials."
+    ],
+    fields: [
+      { id: "q2", key: "phishing",
+        label: "What was the initial entry vector? (one word)",
+        placeholder: "one word",
+        hash: "2ce4ce947f548d483889bf6b6c4731ebd50a8f8e48fc7b84373c5cc4cf1d35b3",
+        hint: "The user was sent a fake invoice from a look-alike domain (harbourline-invoices.com) with a macro-enabled attachment, and interacted with it. The one-word name for that technique — a deceptive email luring the user to act — is what you want." }
+    ]
+  },
+  {
+    kind: "question", phase: 1, time: "03:05", day: "Fri 17 Oct",
+    title: "Pin the timeline",
+    from: { name: "Priya Nair", role: "IT manager", initials: "PN" },
+    message: "Last thing for the timeline: exactly when did encryption start? Insurance and the incident report both need that minute.",
+    brief: [
+      "The file-server audit shows the moment normal files first became *.lockd. The EDR alert names the same minute.",
+      "Give the time as it appears, 24-hour HH:MM."
+    ],
+    fields: [
+      { id: "q3", key: "0141",
+        label: "At what time did file encryption begin?",
+        placeholder: "HH:MM",
+        hash: "85f3c2b2361366a775d7d2cae72fa3fdd49a76f388efaaed07c6c2874cbe36f5",
+        norm: "time",
+        hint: "In the file-server audit, the first RENAME to a .lockd path (the highlighted row) is the start of encryption. The EDR alert states the same time." }
+    ]
+  },
+  {
+    kind: "decision", phase: 2, time: "03:20", day: "Fri 17 Oct",
+    reveals: ["backup", "ransom"],
+    title: "Recover the files",
+    from: { name: "Dan Osei", role: "CFO, woken up", initials: "DO" },
+    message: "A note on the desktops wants 14 Bitcoin and says they copied our data. How fast can we just pay and get our files back? Friday invoicing is due.",
+    brief: [
+      "Check the backup report now in the locker. One backup copy was out of the attacker's reach.",
+      "The CFO wants the quickest route back. Yours is to recover without rewarding the attacker or reinfecting the network."
+    ],
+    prompt: "How do you recover?",
+    options: [
+      { id: "a", text: "Pay the 14 BTC ransom to get the decryptor quickly.",
+        fx: { o: 5, t: -25, c: -5 },
+        result: "Paying funds the group, breaks policy and often sanctions law, and buys an unreliable decryptor — it doesn't undo the data theft, and it marks you as a payer for next time. You still have to rebuild to be sure the attacker is out.",
+        tag: "Paid the ransom" },
+      { id: "b", text: "Rebuild affected systems clean, then restore data from the offline/immutable backup after confirming it's uninfected.",
+        fx: { c: 10, o: 18, t: 10 },
+        result: "The tape and the immutable cloud copy were offline and untouched. You rebuild the hosts from known-good images, reset the exposed credentials, then restore data from the verified backup. Slower than paying, but the attacker gains nothing and you know the result is clean.",
+        tag: "Clean rebuild from good backup", best: true },
+      { id: "c", text: "Restore from last night's disk backup on FS-02 — it's the freshest copy.",
+        fx: { o: -12, c: -8 },
+        result: "That disk backup lived on FS-02 and was encrypted along with everything else — the report shows it as *.lockd. There's nothing to restore from there, and you've burned an hour finding out.",
+        tag: "Backup was also encrypted" }
+    ]
+  },
+  {
+    kind: "decision", phase: 3, time: "08:30", day: "Fri 17 Oct",
+    title: "Who needs to know",
+    from: { name: "Priya Nair", role: "IT manager", initials: "PN" },
+    message: "Recovery's underway. The note says they stole 40GB — that's likely personal data on staff and customers. What's our notification call?",
+    brief: [
+      "The ransom note claims data was exfiltrated, and the shared drive held HR contracts and customer records.",
+      "Notification has legal deadlines and an order: get your facts and your advisers lined up before you speak publicly."
+    ],
+    prompt: "How do you handle notification?",
+    options: [
+      { id: "a", text: "Say nothing externally and hope recovery finishes before anyone notices.",
+        fx: { t: -22 },
+        result: "Concealing a breach involving personal data breaks notification law in most jurisdictions and destroys trust when it surfaces — and it will. Regulators treat a cover-up far more harshly than the breach itself.",
+        tag: "Concealment" },
+      { id: "b", text: "Post publicly on social media straight away that you've been hacked.",
+        fx: { t: -8, o: -3 },
+        result: "Going loud before you have the facts spreads wrong information, panics staff and customers, and hands the attacker confirmation. Notification should be deliberate and sequenced, not a reflex.",
+        tag: "Premature public post" },
+      { id: "c", text: "Notify leadership and legal now; prepare regulator and affected-individual notices within the legal deadline; brief staff on a single line.",
+        fx: { t: 18, o: 4 },
+        result: "You escalate internally, bring in legal and your insurer, and prepare the regulatory notification within the required window (commonly 72 hours) with a clear, factual account. Staff get one agreed line. Measured and defensible.",
+        tag: "Lawful, sequenced notification", best: true }
+    ]
+  },
+  {
+    kind: "decision", phase: 4, time: "Mon 11:00", day: "Mon 20 Oct",
+    title: "Stop it happening again",
+    from: { name: "Dan Osei", role: "CFO", initials: "DO" },
+    message: "We're back up. The board wants one priority fix funded this quarter. What's the single most effective change?",
+    brief: [
+      "Post-incident review. The chain was: phishing email → stolen password → VPN login from outside → RDP → ransomware.",
+      "Pick the control that would most directly have broken that chain."
+    ],
+    prompt: "What's your top recommendation?",
+    options: [
+      { id: "a", text: "Buy a bigger, more expensive antivirus product.",
+        fx: { c: 3 },
+        result: "Better endpoint detection helps, but it wouldn't have stopped a valid password logging in over the VPN. It treats a symptom, not the way in.",
+        tag: "Tool over control" },
+      { id: "b", text: "Enforce multi-factor authentication on the VPN and all remote access, plus phishing training.",
+        fx: { c: 15, t: 8 },
+        result: "MFA would have blocked the login even with the stolen password — the single change that most directly breaks this attack chain — and phishing training reduces the odds the credential is given up at all.",
+        tag: "Breaks the attack chain", best: true },
+      { id: "c", text: "Tell staff to choose longer passwords.",
+        fx: { c: 4 },
+        result: "Longer passwords help against brute force, but this password was phished, not cracked — the user handed it over. Length alone wouldn't have stopped it.",
+        tag: "Addresses the wrong weakness" }
+    ]
+  }
+];
+/* ===================== END SCENARIO ===================== */
+
+
+/* ============== ENGINE ============== */
+const KEY = "irlab-ir01-v2";
+const $ = (s) => document.querySelector(s);
+const el = (t, c, h) => { const n = document.createElement(t); if (c) n.className = c; if (h != null) n.innerHTML = h; return n; };
+
+const state = loadState();
+
+function freshState() {
+  const meters = {};
+  METERS.forEach(m => meters[m.key] = m.start);
+  return { started: false, idx: 0, meters, revealed: [], history: [], answers: {}, activeTab: null };
+}
+function loadState() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) { const s = JSON.parse(raw); if (s && typeof s.idx === "number") return s; }
+  } catch (e) {}
+  return freshState();
+}
+function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+
+async function sha256(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function normalize(v, mode) {
+  let s = String(v).trim().toLowerCase();
+  if (mode === "time") s = s.replace(/[^0-9]/g, "");
+  else s = s.replace(/^@/, "").replace(/\s+/g, "");
+  return s;
+}
+
+/* ---- render top bar ---- */
+function renderBar() {
+  const stage = STAGES[Math.min(state.idx, STAGES.length - 1)];
+  const curPhase = state.idx >= STAGES.length ? PHASES.length : stage.phase;
+  $("#clockTime").textContent = stage ? stage.time : "—";
+  $("#clockDay").textContent = stage ? stage.day : "";
+  const ph = $("#phases"); ph.innerHTML = "";
+  PHASES.forEach((p, i) => {
+    const li = el("li", i < curPhase ? "done" : i === curPhase ? "now" : "", p);
+    ph.appendChild(li);
+  });
+  const mWrap = $("#meters"); mWrap.innerHTML = "";
+  METERS.forEach(m => {
+    const v = Math.max(0, Math.min(100, Math.round(state.meters[m.key])));
+    const node = el("div", "meter");
+    node.innerHTML = `<span>${m.label}</span><span class="val">${v}</span><span class="track"><span class="fill"></span></span>`;
+    const fill = node.querySelector(".fill");
+    fill.style.width = v + "%";
+    fill.style.background = v >= 60 ? "var(--good)" : v >= 35 ? "var(--accent)" : "var(--bad)";
+    mWrap.appendChild(node);
+  });
+}
+
+/* ---- evidence locker ---- */
+function availableEvidence() {
+  return EVIDENCE.filter(e => state.revealed.includes(e.id));
+}
+function renderLocker() {
+  const avail = availableEvidence();
+  $("#evCount").textContent = avail.length ? `${avail.length} item${avail.length > 1 ? "s" : ""}` : "";
+  const tabs = $("#tabs"); tabs.innerHTML = "";
+  if (!avail.length) {
+    tabs.hidden = true;
+    $("#evBody").innerHTML = `<p class="locked">Evidence will appear here as the incident develops.</p>`;
+    return;
+  }
+  tabs.hidden = false;
+  if (!avail.find(e => e.id === state.activeTab)) state.activeTab = avail[avail.length - 1].id;
+  avail.forEach(e => {
+    const isNew = state.newIds && state.newIds.includes(e.id);
+    const t = el("button", "tab" + (e.id === state.activeTab ? " active" : ""));
+    t.setAttribute("role", "tab");
+    t.innerHTML = e.label + (isNew ? ` <span class="new">NEW</span>` : "");
+    t.addEventListener("click", () => {
+      state.activeTab = e.id;
+      if (state.newIds) state.newIds = state.newIds.filter(x => x !== e.id);
+      renderLocker();
+    });
+    tabs.appendChild(t);
+  });
+  renderEvidenceBody(avail.find(e => e.id === state.activeTab));
+}
+function renderEvidenceBody(ev) {
+  const body = $("#evBody"); body.innerHTML = "";
+  if (!ev) return;
+  if (ev.meta) {
+    const meta = el("div", "ev-meta");
+    ev.meta.forEach(([k, v]) => { const d = el("span", null, `${k}: <b>${v}</b>`); meta.appendChild(d); });
+    body.appendChild(meta);
+  }
+  if (ev.note) body.appendChild(el("p", "ev-note", ev.note));
+  if (ev.kind === "doc") {
+    body.appendChild(el("pre", "doc", escapeHTML(ev.body)));
+  } else if (ev.kind === "table") {
+    const wrap = el("div", "table-wrap");
+    const table = el("table");
+    const thead = el("thead");
+    const htr = el("tr");
+    ev.columns.forEach(c => htr.appendChild(el("th", null, c)));
+    thead.appendChild(htr); table.appendChild(thead);
+    const tb = el("tbody");
+    ev.rows.forEach(r => {
+      const hot = r[r.length - 1] === true;
+      const cells = hot ? r.slice(0, -1) : r;
+      const tr = el("tr", hot ? "hot" : "");
+      cells.forEach((c, i) => {
+        const td = el("td", i === cells.length - 1 ? "wrap" : "", escapeHTML(String(c)));
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+    table.appendChild(tb); wrap.appendChild(table); body.appendChild(wrap);
+  }
+}
+function escapeHTML(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+/* ---- action log ---- */
+function renderLog() {
+  const log = $("#log"); log.innerHTML = "";
+  if (!state.history.length) { log.appendChild(el("li", "empty", "No decisions logged yet.")); return; }
+  state.history.forEach(h => {
+    const li = el("li");
+    li.innerHTML = `<span class="t">${h.time}</span><span>${escapeHTML(h.text)}</span>`;
+    log.appendChild(li);
+  });
+}
+
+/* ---- stage rendering ---- */
+function renderStage() {
+  renderBar();
+  if (state.idx >= STAGES.length) return renderReport();
+  const s = STAGES[state.idx];
+  const stage = $("#stage");
+  stage.innerHTML = "";
+
+  const head = el("div", "stage-head");
+  head.appendChild(el("h2", null, escapeHTML(s.title)));
+  head.appendChild(el("span", "counter", `Stage ${state.idx + 1} / ${STAGES.length}`));
+  stage.appendChild(head);
+
+  const msg = el("div", "msg");
+  msg.innerHTML = `<div class="avatar">${s.from.initials}</div>
+    <div><div class="who"><b>${escapeHTML(s.from.name)}</b> · ${escapeHTML(s.from.role)}</div>
+    <p>${escapeHTML(s.message)}</p></div>`;
+  stage.appendChild(msg);
+
+  const brief = el("div", "brief");
+  s.brief.forEach(p => brief.appendChild(el("p", null, escapeHTML(p))));
+  stage.appendChild(brief);
+
+  const toEv = el("button", "to-evidence", "↑ Open the evidence locker");
+  toEv.addEventListener("click", () => $("#locker").scrollIntoView({ behavior: "smooth", block: "start" }));
+  stage.appendChild(toEv);
+
+  if (s.kind === "decision") renderDecision(stage, s);
+  else renderQuestion(stage, s);
+}
+
+function renderDecision(stage, s) {
+  stage.appendChild(el("p", "prompt", escapeHTML(s.prompt)));
+  const prev = state.answers["stage" + state.idx];
+  const opts = el("div", "options");
+  s.options.forEach((o, i) => {
+    const btn = el("button", "opt");
+    btn.innerHTML = `<span class="key">${String.fromCharCode(65 + i)}</span><span>${escapeHTML(o.text)}</span>`;
+    if (prev) {
+      btn.disabled = true;
+      if (o.id === prev) btn.classList.add("chosen"); else btn.classList.add("faded");
+    } else {
+      btn.addEventListener("click", () => chooseOption(s, o));
+    }
+    opts.appendChild(btn);
+  });
+  stage.appendChild(opts);
+  if (prev) {
+    const chosen = s.options.find(o => o.id === prev);
+    stage.appendChild(buildOutcome(chosen));
+    stage.appendChild(nextButton());
+  }
+}
+
+function buildOutcome(o) {
+  const out = el("div", "outcome");
+  out.appendChild(el("p", null, escapeHTML(o.result)));
+  const fx = el("div", "fx");
+  Object.entries(o.fx || {}).forEach(([k, v]) => {
+    const m = METERS.find(x => x.key === k);
+    const chip = el("span", "chip " + (v >= 0 ? "up" : "down"), `${m.label} ${v >= 0 ? "+" : ""}${v}`);
+    fx.appendChild(chip);
+  });
+  out.appendChild(fx);
+  return out;
+}
+
+function chooseOption(s, o) {
+  Object.entries(o.fx || {}).forEach(([k, v]) => { state.meters[k] = Math.max(0, Math.min(100, state.meters[k] + v)); });
+  state.answers["stage" + state.idx] = o.id;
+  state.history.push({ time: s.time, text: `${s.title}: ${o.text}`, tag: o.tag, best: !!o.best });
+  save();
+  renderStage(); renderLog();
+}
+
+function nextButton() {
+  const row = el("div", "actions");
+  const btn = el("button", "btn", state.idx + 1 >= STAGES.length ? "Close the incident →" : "Continue →");
+  btn.addEventListener("click", advance);
+  row.appendChild(btn);
+  return row;
+}
+
+function renderQuestion(stage, s) {
+  const form = el("form", "answer-form");
+  const solved = s.fields.every(f => state.answers[f.id]);
+  s.fields.forEach(f => {
+    const prev = state.answers[f.id];
+    form.appendChild(el("label", null, escapeHTML(f.label)));
+    const row = el("div", "answer-row");
+    const input = document.createElement("input");
+    input.type = "text"; input.id = f.id; input.placeholder = f.placeholder || ""; input.autocomplete = "off";
+    input.spellcheck = false;
+    if (prev) { input.value = prev; input.disabled = true; }
+    const status = el("span", "status" + (prev ? " ok" : ""), prev ? "✓ confirmed" : "");
+    row.appendChild(input); row.appendChild(status);
+    form.appendChild(row);
+    form.appendChild(el("p", "hint", escapeHTML(f.hint)));
+    f._input = input; f._status = status;
+  });
+  if (!solved) {
+    const row = el("div", "actions");
+    const check = el("button", "btn", "Check answer" + (s.fields.length > 1 ? "s" : ""));
+    check.type = "submit";
+    row.appendChild(check);
+    form.appendChild(row);
+  }
+  form.addEventListener("submit", (ev) => { ev.preventDefault(); checkAnswers(s); });
+  stage.appendChild(form);
+  if (solved) stage.appendChild(nextButton());
+}
+
+async function checkAnswers(s) {
+  let allOK = true;
+  for (const f of s.fields) {
+    if (state.answers[f.id]) continue;
+    const val = f._input.value;
+    const h = await sha256(normalize(val, f.norm));
+    if (h === f.hash) {
+      state.answers[f.id] = normalize(val, f.norm);
+      f._input.disabled = true;
+      f._status.textContent = "✓ correct"; f._status.className = "status ok";
+      state.history.push({ time: s.time, text: `${s.title}: answered "${normalize(val, f.norm)}"`, correct: true });
+    } else {
+      allOK = false;
+      f._status.textContent = "✗ not found in the evidence"; f._status.className = "status no";
+    }
+  }
+  save(); renderLog();
+  if (s.fields.every(f => state.answers[f.id])) { renderStage(); }
+}
+
+function advance() {
+  state.idx++;
+  state.newIds = [];
+  const s = STAGES[state.idx];
+  if (s && s.reveals) s.reveals.forEach(id => { if (!state.revealed.includes(id)) { state.revealed.push(id); state.newIds.push(id); } });
+  save();
+  renderStage(); renderLocker();
+  $("#console").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/* ---- final report + flag ---- */
+async function renderReport() {
+  $("#console").hidden = true;
+  const r = $("#report"); r.hidden = false;
+
+  const bestCount = state.history.filter(h => h.best).length;
+  const decisionCount = STAGES.filter(s => s.kind === "decision").length;
+  const avg = METERS.reduce((a, m) => a + state.meters[m.key], 0) / METERS.length;
+  let grade, verdict;
+  if (avg >= 72 && bestCount >= decisionCount - 1) { grade = "A"; verdict = "A controlled, by-the-book response. You contained fast, preserved the evidence, recovered cleanly and notified lawfully."; }
+  else if (avg >= 58) { grade = "B"; verdict = "A solid response with a few costly detours. The company recovered, but some choices spent evidence, time or trust you didn't need to."; }
+  else if (avg >= 42) { grade = "C"; verdict = "You got through it, but several decisions made the incident worse than it had to be. Review the stages marked below."; }
+  else { grade = "D"; verdict = "This response caused serious self-inflicted damage. Work back through the debrief — the order of operations matters as much as the actions."; }
+
+  const flag = await buildFlag();
+
+  r.innerHTML = "";
+  r.appendChild(el("div", "eyebrow", "Incident report · INC-20261017-0207"));
+  const vr = el("div", "verdict");
+  const gradeColor = grade === "A" ? "var(--good)" : grade === "D" ? "var(--bad)" : "var(--accent)";
+  vr.innerHTML = `<div class="grade" style="color:${gradeColor}">${grade}</div>
+    <div><h2>Incident closed</h2><p>${verdict}</p></div>`;
+  r.appendChild(vr);
+
+  const fm = el("div", "final-meters");
+  METERS.forEach(m => {
+    const v = Math.round(state.meters[m.key]);
+    const d = el("div");
+    d.innerHTML = `<span class="num">${v}</span><span class="lab">${m.label}</span>`;
+    fm.appendChild(d);
+  });
+  r.appendChild(fm);
+
+  if (flag) {
+    r.appendChild(el("h2", null, "Your flag"));
+    const fb = el("div", "flagbox");
+    fb.innerHTML = `<code id="flagText">${flag}</code>`;
+    const copy = el("button", "btn ghost", "Copy");
+    copy.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(flag); copy.textContent = "Copied"; setTimeout(() => copy.textContent = "Copy", 1500); }
+      catch (e) { const rg = document.createRange(); rg.selectNode($("#flagText")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(rg); }
+    });
+    fb.appendChild(copy);
+    r.appendChild(fb);
+    r.appendChild(el("p", "hint", "This flag is built from the three facts you recovered. Submit it on your course platform. The grade above reflects your decisions and is for your own learning."));
+  } else {
+    r.appendChild(el("h2", null, "No flag — you skipped the investigation"));
+    r.appendChild(el("p", "hint", "The flag is assembled only when all three questions are answered correctly. Use “Review this run” to go back and work the evidence."));
+  }
+
+  r.appendChild(el("h2", null, "Debrief — every stage"));
+  const list = el("ol", "debrief");
+  STAGES.forEach((s, i) => {
+    const li = el("li");
+    const t = el("div", "t", s.time);
+    const body = el("div");
+    body.appendChild(el("h3", null, s.title));
+    if (s.kind === "decision") {
+      const chosenId = state.answers["stage" + i];
+      const chosen = s.options.find(o => o.id === chosenId);
+      const best = s.options.find(o => o.best);
+      if (chosen) body.appendChild(el("p", "yours " + (chosen.best ? "good" : "bad"), `You chose: ${chosen.text}  (${chosen.tag})`));
+      if (!chosen || !chosen.best) body.appendChild(el("p", "lesson", `<b>Best response:</b> ${best.text}`));
+      body.querySelectorAll("p").forEach(p => p.innerHTML = p.innerHTML);
+    } else {
+      s.fields.forEach(f => {
+        const a = state.answers[f.id];
+        body.appendChild(el("p", "yours " + (a ? "good" : "bad"), a ? `You recovered: ${a}` : "Not answered"));
+      });
+    }
+    li.appendChild(t); li.appendChild(body);
+    list.appendChild(li);
+  });
+  r.appendChild(list);
+
+  const row = el("div", "restart-row");
+  const again = el("button", "btn ghost", "Review this run");
+  again.addEventListener("click", () => { state.idx = 0; save(); $("#report").hidden = true; $("#console").hidden = false; renderStage(); renderLocker(); renderLog(); window.scrollTo({ top: 0, behavior: "smooth" }); });
+  const reset = el("button", "btn", "Run a fresh incident");
+  reset.addEventListener("click", resetAll);
+  row.appendChild(again); row.appendChild(reset);
+  r.appendChild(row);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function buildFlag() {
+  const q = { q1: state.answers.q1, q2: state.answers.q2, q3: state.answers.q3 };
+  if (!q.q1 || !q.q2 || !q.q3) return null;
+  return `FLAG{${q.q1}_${q.q2}_${q.q3}}`;
+}
+
+function resetAll() {
+  const fresh = freshState();
+  Object.keys(state).forEach(k => delete state[k]);
+  Object.assign(state, fresh);
+  save();
+  $("#report").hidden = true;
+  $("#console").hidden = true;
+  $("#briefing").hidden = false;
+  $("#resetBtn").hidden = true;
+  $("#resumeHint").hidden = true;
+  renderBar(); renderLocker(); renderLog();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+/* ---- boot ---- */
+function begin() {
+  state.started = true;
+  if (!state.revealed.length) {
+    STAGES[0].reveals.forEach(id => { if (!state.revealed.includes(id)) state.revealed.push(id); });
+  }
+  save();
+  $("#briefing").hidden = true;
+  $("#report").hidden = true;
+  $("#console").hidden = false;
+  renderStage(); renderLocker(); renderLog();
+}
+
+$("#startBtn").addEventListener("click", begin);
+$("#resetBtn").addEventListener("click", resetAll);
+
+renderBar();
+if (state.started) {
+  $("#resumeHint").hidden = false;
+  $("#resetBtn").hidden = false;
+  if (state.idx >= STAGES.length) { $("#briefing").hidden = true; renderReport(); }
+  else { begin(); }
+} else {
+  renderLocker();
+}
+</script>
+</body>
+</html>
